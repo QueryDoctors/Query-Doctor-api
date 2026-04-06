@@ -40,6 +40,9 @@ class PoolManager:
     def exists(self, db_id: str) -> bool:
         return db_id in self._pools
 
+    def all_ids(self) -> list:
+        return list(self._pools.keys())
+
     async def close(self, db_id: str) -> None:
         pool = self._pools.pop(db_id, None)
         if pool:

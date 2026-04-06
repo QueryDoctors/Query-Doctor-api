@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     # ─── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # ─── ClickHouse (HTTP port 8123) ───────────────────────────────────────────
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 8123
+    clickhouse_db: str = "query-doctor-local"
+    clickhouse_user: str = "admin"
+    clickhouse_password: str = "admin123"
+
+    # ─── Incident Detection ────────────────────────────────────────────────────
+    incident_min_calls_per_minute: int = 20
+    incident_min_spike_duration_seconds: int = 30
+    incident_trigger_minutes: int = 2
+    incident_cooldown_minutes: int = 5
+    incident_auto_resolve_minutes: int = 5
+    incident_baseline_window_minutes: int = 10
+    detection_interval_seconds: int = 10
+
     model_config = SettingsConfigDict(
         # env_file is set dynamically in get_settings() via ENV_FILE env var
         env_file_encoding="utf-8",
