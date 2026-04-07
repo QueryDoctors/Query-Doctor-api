@@ -5,19 +5,15 @@ from app.infrastructure.database.repositories.pg_connection_repository import Pg
 from app.infrastructure.database.repositories.pg_metrics_repository import PgMetricsRepository
 from app.infrastructure.database.repositories.pg_query_repository import PgQueryRepository
 from app.infrastructure.persistence.pg_manager import AppPgManager
-from app.infrastructure.persistence.ch_manager import ClickHouseManager
 from app.infrastructure.persistence.encryptor import Encryptor
 from app.infrastructure.persistence.repositories.pg_connection_store_repository import PgConnectionStoreRepository
 from app.infrastructure.persistence.repositories.pg_snapshot_repository import PgSnapshotRepository
 from app.infrastructure.persistence.repositories.pg_incident_repository import PgIncidentRepository
-from app.infrastructure.persistence.repositories.ch_baseline_repository import ChBaselineRepository
 from app.infrastructure.persistence.repositories.pg_muted_query_repository import PgMutedQueryRepository
-from app.infrastructure.persistence.repositories.pg_anomaly_tracking_repository import PgAnomalyTrackingRepository
+from app.infrastructure.websocket.manager import WebSocketManager
 from app.infrastructure.config import get_settings
 from app.domain.services.recommendation_engine import RecommendationEngine
 from app.domain.services.incident_engine import IncidentEngine
-from app.domain.services.baseline_calculator import BaselineCalculator
-from app.domain.value_objects.incident_config import IncidentConfig
 from app.application.use_cases.connect_database import ConnectDatabaseUseCase
 from app.application.use_cases.get_metrics import GetMetricsUseCase
 from app.application.use_cases.get_queries import GetQueriesUseCase
@@ -34,17 +30,22 @@ from app.application.use_cases.acknowledge_incident import AcknowledgeIncidentUs
 from app.application.use_cases.resolve_incident import ResolveIncidentUseCase
 from app.application.use_cases.mute_query import MuteQueryUseCase
 from app.application.use_cases.unmute_query import UnmuteQueryUseCase
-from app.application.use_cases.run_detection_cycle import RunDetectionCycleUseCase
+from app.infrastructure.clickhouse.ch_history_repo import ChHistoryRepo
 
-# Singleton — one pool manager for the lifetime of the process
+# ── Process-lifetime singletons ───────────────────────────────────────────────
 _pool_manager = PoolManager()
 _engine = RecommendationEngine()
 _incident_engine = IncidentEngine()
-_calculator = BaselineCalculator()
-
-# App-DB singletons — shared with main.py via import
 _app_pg_manager = AppPgManager()
-_ch_manager = ClickHouseManager()
+_ws_manager = WebSocketManager()
+_ch_history_repo: ChHistoryRepo | None = None
+
+
+def get_ch_history_repo() -> ChHistoryRepo:
+    global _ch_history_repo
+    if _ch_history_repo is None:
+        _ch_history_repo = ChHistoryRepo(get_settings())
+    return _ch_history_repo
 
 
 def get_pool_manager() -> PoolManager:
@@ -55,13 +56,15 @@ def get_app_pg_manager() -> AppPgManager:
     return _app_pg_manager
 
 
-def get_ch_manager() -> ClickHouseManager:
-    return _ch_manager
+def get_ws_manager() -> WebSocketManager:
+    return _ws_manager
 
 
 def get_encryptor() -> Encryptor:
     return Encryptor(get_settings().encryption_key)
 
+
+# ── Repository providers ──────────────────────────────────────────────────────
 
 def get_connection_store_repo(
     manager: AppPgManager = Depends(get_app_pg_manager),
@@ -74,6 +77,18 @@ def get_snapshot_repo(
     manager: AppPgManager = Depends(get_app_pg_manager),
 ) -> PgSnapshotRepository:
     return PgSnapshotRepository(manager)
+
+
+def get_incident_repo(
+    manager: AppPgManager = Depends(get_app_pg_manager),
+) -> PgIncidentRepository:
+    return PgIncidentRepository(manager)
+
+
+def get_muted_query_repo(
+    manager: AppPgManager = Depends(get_app_pg_manager),
+) -> PgMutedQueryRepository:
+    return PgMutedQueryRepository(manager)
 
 
 # ── Monitoring use cases ──────────────────────────────────────────────────────
@@ -106,7 +121,7 @@ def get_recommendations_use_case(
     )
 
 
-# ── Persistence use cases ─────────────────────────────────────────────────────
+# ── Saved-connection use cases ────────────────────────────────────────────────
 
 def get_save_saved_connection_use_case(
     repo: PgConnectionStoreRepository = Depends(get_connection_store_repo),
@@ -131,6 +146,8 @@ def get_delete_saved_connection_use_case(
 ) -> DeleteSavedConnectionUseCase:
     return DeleteSavedConnectionUseCase(repo)
 
+
+# ── Snapshot use cases ────────────────────────────────────────────────────────
 
 def get_save_snapshot_use_case(
     pool_manager: PoolManager = Depends(get_pool_manager),
@@ -167,44 +184,7 @@ def get_live_logs_use_case(
     return GetLiveLogsUseCase(PgLogRepository(pool_manager))
 
 
-# ── Incident use cases ────────────────────────────────────────────────────────
-
-def get_incident_repo(
-    manager: AppPgManager = Depends(get_app_pg_manager),
-) -> PgIncidentRepository:
-    return PgIncidentRepository(manager)
-
-
-def get_baseline_repo(
-    ch: ClickHouseManager = Depends(get_ch_manager),
-) -> ChBaselineRepository:
-    return ChBaselineRepository(ch)
-
-
-def get_muted_query_repo(
-    manager: AppPgManager = Depends(get_app_pg_manager),
-) -> PgMutedQueryRepository:
-    return PgMutedQueryRepository(manager)
-
-
-def get_anomaly_tracking_repo(
-    manager: AppPgManager = Depends(get_app_pg_manager),
-) -> PgAnomalyTrackingRepository:
-    return PgAnomalyTrackingRepository(manager)
-
-
-def get_incident_config() -> IncidentConfig:
-    s = get_settings()
-    return IncidentConfig(
-        min_calls_per_minute=s.incident_min_calls_per_minute,
-        min_spike_duration_seconds=s.incident_min_spike_duration_seconds,
-        incident_trigger_minutes=s.incident_trigger_minutes,
-        cooldown_minutes=s.incident_cooldown_minutes,
-        auto_resolve_minutes=s.incident_auto_resolve_minutes,
-        baseline_window_minutes=s.incident_baseline_window_minutes,
-        detection_interval_seconds=s.detection_interval_seconds,
-    )
-
+# ── Incident use cases (read + action only — detection is in Go) ──────────────
 
 def get_incidents_use_case(
     repo: PgIncidentRepository = Depends(get_incident_repo),
@@ -234,23 +214,3 @@ def get_unmute_query_use_case(
     repo: PgMutedQueryRepository = Depends(get_muted_query_repo),
 ) -> UnmuteQueryUseCase:
     return UnmuteQueryUseCase(repo)
-
-
-def get_detection_use_case(
-    pool_manager: PoolManager = Depends(get_pool_manager),
-    baseline_repo: ChBaselineRepository = Depends(get_baseline_repo),
-    incident_repo: PgIncidentRepository = Depends(get_incident_repo),
-    muted_repo: PgMutedQueryRepository = Depends(get_muted_query_repo),
-    anomaly_repo: PgAnomalyTrackingRepository = Depends(get_anomaly_tracking_repo),
-) -> RunDetectionCycleUseCase:
-    config = get_incident_config()
-    return RunDetectionCycleUseCase(
-        query_repo=PgQueryRepository(pool_manager),
-        baseline_repo=baseline_repo,
-        incident_repo=incident_repo,
-        muted_repo=muted_repo,
-        anomaly_repo=anomaly_repo,
-        engine=_incident_engine,
-        calculator=_calculator,
-        config=config,
-    )

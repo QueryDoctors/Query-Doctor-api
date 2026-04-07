@@ -1,75 +1,77 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
+
+import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.infrastructure.config import get_settings
-from app.infrastructure.detection.scheduler import DetectionScheduler
 from app.presentation.routers import connection, metrics, queries, recommendations
 from app.presentation.routers import saved_connections, snapshots, logs
 from app.presentation.routers import incidents as incidents_router
 from app.presentation.dependencies import (
     get_app_pg_manager,
-    get_ch_manager,
     get_pool_manager,
-    get_incident_config,
-    _incident_engine,
-    _calculator,
+    get_ws_manager,
 )
-from app.infrastructure.persistence.repositories.ch_baseline_repository import ChBaselineRepository
-from app.infrastructure.persistence.repositories.pg_incident_repository import PgIncidentRepository
-from app.infrastructure.persistence.repositories.pg_muted_query_repository import PgMutedQueryRepository
-from app.infrastructure.persistence.repositories.pg_anomaly_tracking_repository import PgAnomalyTrackingRepository
-from app.infrastructure.database.repositories.pg_query_repository import PgQueryRepository
-from app.application.use_cases.run_detection_cycle import RunDetectionCycleUseCase
 
-# ─── App-level singletons (shared across requests) ───────────────────────────
+logger = logging.getLogger(__name__)
+
+# ─── App-level singletons ─────────────────────────────────────────────────────
 _app_pg_manager = get_app_pg_manager()
-_ch_manager = get_ch_manager()
 _pool_manager = get_pool_manager()
+_ws_manager = get_ws_manager()
+
+# Dedicated asyncpg connection for LISTEN (separate from the pool)
+_notify_conn: asyncpg.Connection | None = None
+
+
+async def _on_incident_notify(conn, pid, channel, payload: str) -> None:
+    """Called by asyncpg when Go detector sends pg_notify('incident_update', db_id)."""
+    try:
+        await _ws_manager.broadcast(payload, "incident_update")
+    except Exception as exc:
+        logger.warning(f"[notify] incident broadcast failed for db_id={payload}: {exc}")
+
+
+async def _on_query_notify(conn, pid, channel, payload: str) -> None:
+    """Called by asyncpg when Go detector sends pg_notify('query_update', db_id)."""
+    try:
+        await _ws_manager.broadcast(payload, "query_update")
+    except Exception as exc:
+        logger.warning(f"[notify] query broadcast failed for db_id={payload}: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _notify_conn
     settings = get_settings()
 
-    # Startup: connect to databases
+    # ── Startup ───────────────────────────────────────────────────────────────
     await _app_pg_manager.connect(settings)
-    print(f"[startup] env={settings.env.value} | app DB connected")
+    logger.info(f"[startup] env={settings.env.value} | app DB connected")
 
-    await _ch_manager.connect(settings)
-    print(f"[startup] ClickHouse connected (db={settings.clickhouse_db})")
-
-    # Build detection use case with singleton repos
-    config = get_incident_config()
-    detection_use_case = RunDetectionCycleUseCase(
-        query_repo=PgQueryRepository(_pool_manager),
-        baseline_repo=ChBaselineRepository(_ch_manager),
-        incident_repo=PgIncidentRepository(_app_pg_manager),
-        muted_repo=PgMutedQueryRepository(_app_pg_manager),
-        anomaly_repo=PgAnomalyTrackingRepository(_app_pg_manager),
-        engine=_incident_engine,
-        calculator=_calculator,
-        config=config,
-    )
-    scheduler = DetectionScheduler(
-        detection_use_case=detection_use_case,
-        pool_manager=_pool_manager,
-        interval_seconds=settings.detection_interval_seconds,
-    )
-    await scheduler.start()
+    # Open a dedicated connection for LISTEN — must NOT be from the pool
+    _notify_conn = await asyncpg.connect(settings.app_database_url, ssl="disable")
+    await _notify_conn.add_listener("incident_update", _on_incident_notify)
+    await _notify_conn.add_listener("query_update", _on_query_notify)
+    logger.info("[startup] LISTEN incident_update + query_update active")
 
     yield
 
-    # Shutdown
-    await scheduler.stop()
-    await _ch_manager.close()
-    print("[shutdown] ClickHouse closed")
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    if _notify_conn:
+        await _notify_conn.remove_listener("incident_update", _on_incident_notify)
+        await _notify_conn.remove_listener("query_update", _on_query_notify)
+        await _notify_conn.close()
+        logger.info("[shutdown] LISTEN connection closed")
+
     await _app_pg_manager.close()
-    print("[shutdown] app DB pool closed")
+    logger.info("[shutdown] app DB pool closed")
 
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
-# Settings loaded lazily inside lifespan — safe to import in tests without .env
 app = FastAPI(
     title="PostgreSQL Performance Advisor",
     version="1.0.0",
