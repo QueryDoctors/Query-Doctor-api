@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     clickhouse_user: str = "admin"
     clickhouse_password: str = "admin123"
 
+    # ─── Auth / JWT ───────────────────────────────────────────────────────────
+    jwt_secret_key: str = "change-me-in-production"
+    jwt_access_token_expire_minutes: int = 15
+    jwt_refresh_token_expire_days: int = 7
+
     # ─── Incident Detection ────────────────────────────────────────────────────
     incident_min_calls_per_minute: int = 20
     incident_min_spike_duration_seconds: int = 30

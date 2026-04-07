@@ -16,8 +16,8 @@ class PgConnectionStoreRepository(IConnectionStoreRepository):
         encrypted = self._encryptor.encrypt(connection.password)
         async with self._manager.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO connections (id, name, host, port, database, db_user, password, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO connections (id, user_id, name, host, port, database, db_user, password, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (id) DO UPDATE
                     SET name = EXCLUDED.name,
                         host = EXCLUDED.host,
@@ -26,7 +26,7 @@ class PgConnectionStoreRepository(IConnectionStoreRepository):
                         db_user = EXCLUDED.db_user,
                         password = EXCLUDED.password
             """,
-                connection.id, connection.name, connection.host,
+                connection.id, connection.user_id, connection.name, connection.host,
                 connection.port, connection.database, connection.user,
                 encrypted, connection.created_at,
             )
@@ -39,17 +39,19 @@ class PgConnectionStoreRepository(IConnectionStoreRepository):
             )
         return self._to_entity(row) if row else None
 
-    async def list_all(self) -> List[SavedConnection]:
+    async def list_all(self, user_id: str) -> List[SavedConnection]:
         async with self._manager.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM connections ORDER BY created_at DESC"
+                "SELECT * FROM connections WHERE user_id = $1 ORDER BY created_at DESC",
+                user_id,
             )
         return [self._to_entity(r) for r in rows]
 
-    async def delete(self, connection_id: str) -> None:
+    async def delete(self, connection_id: str, user_id: str) -> None:
         async with self._manager.pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM connections WHERE id = $1", connection_id
+                "DELETE FROM connections WHERE id = $1 AND user_id = $2",
+                connection_id, user_id,
             )
 
     async def touch(self, connection_id: str) -> None:
@@ -62,6 +64,7 @@ class PgConnectionStoreRepository(IConnectionStoreRepository):
     def _to_entity(self, row) -> SavedConnection:
         return SavedConnection(
             id=row["id"],
+            user_id=row["user_id"] or "",
             name=row["name"],
             host=row["host"],
             port=row["port"],

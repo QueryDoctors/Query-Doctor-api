@@ -15,6 +15,7 @@ from app.presentation.dependencies import (
     get_get_saved_connection_use_case,
     get_list_saved_connections_use_case,
     get_delete_saved_connection_use_case,
+    get_current_user,
 )
 
 router = APIRouter(prefix="/saved-connections", tags=["saved-connections"])
@@ -23,10 +24,12 @@ router = APIRouter(prefix="/saved-connections", tags=["saved-connections"])
 @router.post("", response_model=SavedConnectionResponse, status_code=201)
 async def create_saved_connection(
     body: SavedConnectionRequest,
+    current_user: dict = Depends(get_current_user),
     use_case: SaveSavedConnectionUseCase = Depends(get_save_saved_connection_use_case),
 ) -> SavedConnectionResponse:
     try:
         result = await use_case.execute(SavedConnectionDTO(
+            user_id=current_user["user_id"],
             name=body.name, host=body.host, port=body.port,
             database=body.database, user=body.user, password=body.password,
         ))
@@ -37,9 +40,10 @@ async def create_saved_connection(
 
 @router.get("", response_model=ListSavedConnectionsResponse)
 async def list_saved_connections(
+    current_user: dict = Depends(get_current_user),
     use_case: ListSavedConnectionsUseCase = Depends(get_list_saved_connections_use_case),
 ) -> ListSavedConnectionsResponse:
-    result = await use_case.execute()
+    result = await use_case.execute(current_user["user_id"])
     return ListSavedConnectionsResponse(
         connections=[_to_response(c) for c in result.connections]
     )
@@ -48,10 +52,11 @@ async def list_saved_connections(
 @router.get("/{connection_id}", response_model=SavedConnectionResponse)
 async def get_saved_connection(
     connection_id: str,
+    current_user: dict = Depends(get_current_user),
     use_case: GetSavedConnectionUseCase = Depends(get_get_saved_connection_use_case),
 ) -> SavedConnectionResponse:
     result = await use_case.execute(connection_id)
-    if result is None:
+    if result is None or result.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail="Saved connection not found")
     return _to_response(result)
 
@@ -59,10 +64,11 @@ async def get_saved_connection(
 @router.delete("/{connection_id}", status_code=204)
 async def delete_saved_connection(
     connection_id: str,
+    current_user: dict = Depends(get_current_user),
     use_case: DeleteSavedConnectionUseCase = Depends(get_delete_saved_connection_use_case),
 ) -> None:
     try:
-        await use_case.execute(connection_id)
+        await use_case.execute(connection_id, current_user["user_id"])
     except KeyError:
         raise HTTPException(status_code=404, detail="Saved connection not found")
 

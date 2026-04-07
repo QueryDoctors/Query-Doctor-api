@@ -13,6 +13,7 @@ class SaveSavedConnectionUseCase:
     async def execute(self, request: SavedConnectionRequest) -> SavedConnectionResult:
         connection = SavedConnection(
             id=str(uuid.uuid4()),
+            user_id=request.user_id,
             name=request.name,
             host=request.host,
             port=request.port,

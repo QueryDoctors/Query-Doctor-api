@@ -89,6 +89,8 @@ if __name__ == "__main__":
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, val = line.partition("=")
-                os.environ.setdefault(key.strip(), val.strip())
+                # Strip inline comments (e.g. "8123  # HTTP port")
+                val = val.split("#")[0].strip()
+                os.environ.setdefault(key.strip(), val)
 
     run()

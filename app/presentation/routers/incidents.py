@@ -8,6 +8,7 @@ from app.application.use_cases.acknowledge_incident import AcknowledgeIncidentUs
 from app.application.use_cases.resolve_incident import ResolveIncidentUseCase
 from app.application.use_cases.mute_query import MuteQueryUseCase
 from app.application.use_cases.unmute_query import UnmuteQueryUseCase
+from app.infrastructure.clickhouse.ch_training_repo import ChTrainingRepo
 from app.infrastructure.websocket.manager import WebSocketManager
 from app.presentation.schemas.incident_schema import IncidentResponse, IncidentsListResponse
 from app.presentation.dependencies import (
@@ -16,6 +17,7 @@ from app.presentation.dependencies import (
     get_resolve_incident_use_case,
     get_mute_query_use_case,
     get_unmute_query_use_case,
+    get_ch_training_repo,
     get_ws_manager,
 )
 
@@ -41,6 +43,7 @@ async def list_incidents(
 async def acknowledge_incident(
     incident_id: str,
     use_case: AcknowledgeIncidentUseCase = Depends(get_acknowledge_incident_use_case),
+    training_repo: ChTrainingRepo = Depends(get_ch_training_repo),
     ws_manager: WebSocketManager = Depends(get_ws_manager),
 ):
     try:
@@ -48,6 +51,9 @@ async def acknowledge_incident(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     await ws_manager.broadcast(dto.db_id, "incident_update")
+    asyncio.create_task(asyncio.to_thread(
+        training_repo.write_outcome, incident_id, "acknowledged", dto.db_id, dto.query_hash,
+    ))
     return IncidentResponse(**vars(dto))
 
 
@@ -55,6 +61,7 @@ async def acknowledge_incident(
 async def resolve_incident(
     incident_id: str,
     use_case: ResolveIncidentUseCase = Depends(get_resolve_incident_use_case),
+    training_repo: ChTrainingRepo = Depends(get_ch_training_repo),
     ws_manager: WebSocketManager = Depends(get_ws_manager),
 ):
     try:
@@ -62,6 +69,13 @@ async def resolve_incident(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     await ws_manager.broadcast(dto.db_id, "incident_update")
+    resolution_time_s = 0
+    if dto.resolved_at and dto.start_time:
+        resolution_time_s = int((dto.resolved_at - dto.start_time).total_seconds())
+    asyncio.create_task(asyncio.to_thread(
+        training_repo.write_outcome,
+        incident_id, "resolved", dto.db_id, dto.query_hash, resolution_time_s,
+    ))
     return IncidentResponse(**vars(dto))
 
 
@@ -70,10 +84,14 @@ async def mute_query(
     db_id: str,
     query_hash: str,
     use_case: MuteQueryUseCase = Depends(get_mute_query_use_case),
+    training_repo: ChTrainingRepo = Depends(get_ch_training_repo),
     ws_manager: WebSocketManager = Depends(get_ws_manager),
 ):
     await use_case.execute(query_hash, db_id, whitelist=False)
     await ws_manager.broadcast(db_id, "incident_update")
+    asyncio.create_task(asyncio.to_thread(
+        training_repo.write_outcome, "", "muted", db_id, query_hash,
+    ))
 
 
 @router.delete("/queries/{db_id}/{query_hash}/mute", status_code=204)
@@ -92,10 +110,14 @@ async def whitelist_query(
     db_id: str,
     query_hash: str,
     use_case: MuteQueryUseCase = Depends(get_mute_query_use_case),
+    training_repo: ChTrainingRepo = Depends(get_ch_training_repo),
     ws_manager: WebSocketManager = Depends(get_ws_manager),
 ):
     await use_case.execute(query_hash, db_id, whitelist=True)
     await ws_manager.broadcast(db_id, "incident_update")
+    asyncio.create_task(asyncio.to_thread(
+        training_repo.write_outcome, "", "whitelisted", db_id, query_hash,
+    ))
 
 
 @router.websocket("/ws/{db_id}")

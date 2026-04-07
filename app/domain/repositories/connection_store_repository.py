@@ -14,12 +14,12 @@ class IConnectionStoreRepository(ABC):
         """Return a saved connection by id, or None."""
 
     @abstractmethod
-    async def list_all(self) -> List[SavedConnection]:
-        """Return all saved connections ordered by created_at DESC."""
+    async def list_all(self, user_id: str) -> List[SavedConnection]:
+        """Return all saved connections for a user ordered by created_at DESC."""
 
     @abstractmethod
-    async def delete(self, connection_id: str) -> None:
-        """Delete a saved connection and all its snapshots (cascade)."""
+    async def delete(self, connection_id: str, user_id: str) -> None:
+        """Delete a saved connection owned by user_id."""
 
     @abstractmethod
     async def touch(self, connection_id: str) -> None:

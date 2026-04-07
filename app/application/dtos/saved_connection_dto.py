@@ -5,6 +5,7 @@ from typing import List, Optional
 
 @dataclass
 class SavedConnectionRequest:
+    user_id: str
     name: str
     host: str
     port: int

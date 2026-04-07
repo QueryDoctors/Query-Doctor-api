@@ -3,15 +3,19 @@ import logging
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.infrastructure.config import get_settings
-from app.presentation.routers import connection, metrics, queries, recommendations
-from app.presentation.routers import saved_connections, snapshots, logs
-from app.presentation.routers import incidents as incidents_router
+from app.presentation.routers import auth, connection, incidents as incidents_router
+from app.presentation.routers import logs, metrics, queries, recommendations
+from app.presentation.routers import saved_connections, snapshots
 from app.presentation.dependencies import (
     get_app_pg_manager,
+    get_current_user,
     get_pool_manager,
     get_ws_manager,
 )
@@ -43,6 +47,15 @@ async def _on_query_notify(conn, pid, channel, payload: str) -> None:
         logger.warning(f"[notify] query broadcast failed for db_id={payload}: {exc}")
 
 
+async def _cleanup_refresh_tokens() -> None:
+    from app.infrastructure.persistence.repositories.pg_refresh_token_repository import PgRefreshTokenRepository
+    while True:
+        await asyncio.sleep(3600)
+        repo = PgRefreshTokenRepository(_app_pg_manager)
+        deleted = await repo.delete_expired()
+        logger.info(f"[cleanup] {deleted} expired/revoked refresh tokens deleted")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _notify_conn
@@ -51,6 +64,8 @@ async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
     await _app_pg_manager.connect(settings)
     logger.info(f"[startup] env={settings.env.value} | app DB connected")
+
+    asyncio.create_task(_cleanup_refresh_tokens())
 
     # Open a dedicated connection for LISTEN — must NOT be from the pool
     _notify_conn = await asyncpg.connect(settings.app_database_url, ssl="disable")
@@ -79,6 +94,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Rate limiter (IP-based, in-memory)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -88,14 +108,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(connection.router)
-app.include_router(metrics.router)
-app.include_router(queries.router)
-app.include_router(recommendations.router)
-app.include_router(saved_connections.router)
-app.include_router(snapshots.router)
-app.include_router(logs.router)
-app.include_router(incidents_router.router)
+# Auth router — public
+app.include_router(auth.router)
+
+# Protected routers — JWT required
+_auth_dep = [Depends(get_current_user)]
+app.include_router(connection.router,         dependencies=_auth_dep)
+app.include_router(metrics.router,            dependencies=_auth_dep)
+app.include_router(queries.router,            dependencies=_auth_dep)
+app.include_router(recommendations.router,    dependencies=_auth_dep)
+app.include_router(saved_connections.router,  dependencies=_auth_dep)
+app.include_router(snapshots.router,          dependencies=_auth_dep)
+app.include_router(logs.router,               dependencies=_auth_dep)
+app.include_router(incidents_router.router,   dependencies=_auth_dep)
 
 
 @app.get("/health", tags=["health"])

@@ -7,8 +7,8 @@ class ListSavedConnectionsUseCase:
     def __init__(self, repo: IConnectionStoreRepository) -> None:
         self._repo = repo
 
-    async def execute(self) -> ListSavedConnectionsResult:
-        connections = await self._repo.list_all()
+    async def execute(self, user_id: str) -> ListSavedConnectionsResult:
+        connections = await self._repo.list_all(user_id)
         return ListSavedConnectionsResult(
             connections=[_to_result(c) for c in connections]
         )

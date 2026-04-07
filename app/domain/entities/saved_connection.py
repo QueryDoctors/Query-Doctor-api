@@ -6,6 +6,7 @@ from typing import Optional
 @dataclass
 class SavedConnection:
     id: str
+    user_id: str           # owner — scoped per authenticated user
     name: str
     host: str
     port: int
