@@ -18,13 +18,13 @@ class PgConnectionStoreRepository(IConnectionStoreRepository):
             await conn.execute("""
                 INSERT INTO connections (id, user_id, name, host, port, database, db_user, password, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (id) DO UPDATE
-                    SET name = EXCLUDED.name,
-                        host = EXCLUDED.host,
+                ON CONFLICT (name, user_id) DO UPDATE
+                    SET host = EXCLUDED.host,
                         port = EXCLUDED.port,
                         database = EXCLUDED.database,
                         db_user = EXCLUDED.db_user,
-                        password = EXCLUDED.password
+                        password = EXCLUDED.password,
+                        last_used = now()
             """,
                 connection.id, connection.user_id, connection.name, connection.host,
                 connection.port, connection.database, connection.user,
